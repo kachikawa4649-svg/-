@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>食事プランナー & 日記（PWA・単一HTML版）</title>
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel for in-browser JSX transform (no build needed) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="icon" href="data:," />
+</head>
+<body class="bg-neutral-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    // Utils
+    const fmtDate = (d) => d.toISOString().slice(0, 10);
+    const startOfWeek = (date) => {
+      const d = new Date(date);
+      const day = (d.getDay() + 6) % 7; // 月=0..日=6
+      d.setDate(d.getDate() - day);
+      d.setHours(0,0,0,0);
+      return d;
+    };
+    const addDays = (date, n) => {
+      const d = new Date(date);
+      d.setDate(d.getDate() + n);
+      return d;
+    };
+    const defaultRecipes = [
+      { id: "r1", name: "焼き鮭定食", tags: ["和食", "魚"], notes: "味噌汁+漬物" },
+      { id: "r2", name: "鶏むね照り焼き", tags: ["和食", "肉", "作り置き"], notes: "ブロッコリー添え" },
+      { id: "r3", name: "野菜たっぷり味噌汁", tags: ["汁物", "ヘルシー"], notes: "冷蔵庫整理にも" },
+      { id: "r4", name: "ナポリタン", tags: ["洋食", "麺"], notes: "子どもウケ◎" },
+      { id: "r5", name: "豚キムチ", tags: ["時短", "肉"], notes: "ご飯が進む" },
+    ];
+    const loadLS = (k, fallback) => {
+      try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+    };
+    const saveLS = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+    // PWA setup (dynamic manifest + SW + install prompt)
+    function setupPWA(setInstallReady) {
+      // icons via canvas
+      const makeIcon = (size) => {
+        const cvs = document.createElement("canvas");
+        cvs.width = cvs.height = size;
+        const ctx = cvs.getContext("2d");
+        ctx.fillStyle = "#111827"; ctx.fillRect(0,0,size,size);
+        ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(size/2, size/2, size*0.44, 0, Math.PI*2); ctx.fill();
+        ctx.font = Math.floor(size*0.45) + "px sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#111827";
+        ctx.fillText("🍳", size/2, size/2 + 2);
+        return cvs.toDataURL("image/png");
+      };
+      const icon192 = makeIcon(192);
+      const icon512 = makeIcon(512);
+
+      // manifest
+      const manifest = {
+        name: "食事プランナー & 日記",
+        short_name: "献立日記",
+        start_url: ".",
+        display: "standalone",
+        background_color: "#ffffff",
+        theme_color: "#111827",
+        icons: [
+          { src: icon192, sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: icon512, sizes: "512x512", type: "image/png", purpose: "any maskable" }
+        ]
+      };
+      const blob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
+      const url = URL.createObjectURL(blob);
+      let link = document.querySelector('link[rel="manifest"]');
+      if (!link) { link = document.createElement("link"); link.rel = "manifest"; document.head.appendChild(link); }
+      link.href = url;
+
+      // service worker
+      if ("serviceWorker" in navigator && window.isSecureContext) {
+        const swCode = `
+          const CACHE = 'meal-planner-v1';
+          self.addEventListener('install', (e) => { self.skipWaiting(); });
+          self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+          self.addEventListener('fetch', (e) => {
+            const req = e.request;
+            if (req.method !== 'GET') return;
+            e.respondWith((async () => {
+              const cache = await caches.open(CACHE);
+              const hit = await cache.match(req);
+              if (hit) return hit;
+              try {
+                const res = await fetch(req);
+                if (res && res.status === 200 && new URL(req.url).origin === location.origin) {
+                  cache.put(req, res.clone());
+                }
+                return res;
+              } catch (err) {
+                return hit || Response.error();
+              }
+            })());
+          });
+        `;
+        const swUrl = URL.createObjectURL(new Blob([swCode], { type: "text/javascript" }));
+        navigator.serviceWorker.register(swUrl).catch(()=>{});
+      }
+
+      // install prompt
+      window.__deferredPrompt = null;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.__deferredPrompt = e;
+        setInstallReady && setInstallReady(true);
+      });
+      window.addEventListener('appinstalled', () => {
+        setInstallReady && setInstallReady(false);
+        window.__deferredPrompt = null;
+      });
+    }
+
+    function AddRecipeForm({ onAdd }) {
+      const [name, setName] = useState("");
+      const [tags, setTags] = useState("");
+      const [notes, setNotes] = useState("");
+      const add = () => {
+        const n = name.trim(); if (!n) return;
+        onAdd({ id: crypto.randomUUID(), name: n, tags: tags.split(",").map(s=>s.trim()).filter(Boolean), notes: notes.trim() });
+        setName(""); setTags(""); setNotes("");
+      };
+      return (
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input className="px-3 py-2 border rounded-xl" placeholder="料理名" value={name} onChange={e=>setName(e.target.value)} />
+          <input className="px-3 py-2 border rounded-xl" placeholder="タグ（カンマ区切り）" value={tags} onChange={e=>setTags(e.target.value)} />
+          <input className="px-3 py-2 border rounded-xl" placeholder="メモ（任意）" value={notes} onChange={e=>setNotes(e.target.value)} />
+          <button className="px-3 py-2 rounded-xl bg-neutral-900 text-white hover:opacity-90" onClick={add}>追加</button>
+        </div>
+      );
+    }
+
+    function StatCard({ label, value }) {
+      return (
+        <div className="border rounded-2xl p-3">
+          <div className="text-sm text-neutral-600">{label}</div>
+          <div className="text-2xl font-bold mt-1">{value}</div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [installReady, setInstallReady] = useState(false);
+      useEffect(() => { setupPWA(setInstallReady); }, []);
+      const doInstall = async () => {
+        const dp = window.__deferredPrompt;
+        if (!dp) return;
+        dp.prompt();
+        await dp.userChoice;
+        window.__deferredPrompt = null;
+        setInstallReady(false);
+      };
+
+      const [recipes, setRecipes] = useState(() => loadLS("mp_recipes", defaultRecipes));
+      const [plan, setPlan] = useState(() => loadLS("mp_plan", {}));
+      const [journal, setJournal] = useState(() => loadLS("mp_journal", []));
+      const [activeTab, setActiveTab] = useState("planner");
+      const [filter, setFilter] = useState("");
+
+      const [anchorDate, setAnchorDate] = useState(() => {
+        const t = new Date(); t.setHours(0,0,0,0); return t;
+      });
+      const weekStart = React.useMemo(() => startOfWeek(anchorDate), [anchorDate]);
+      const weekDays = React.useMemo(() => Array.from({length:7}, (_,i)=>addDays(weekStart, i)), [weekStart]);
+
+      useEffect(() => saveLS("mp_recipes", recipes), [recipes]);
+      useEffect(() => saveLS("mp_plan", plan), [plan]);
+      useEffect(() => saveLS("mp_journal", journal), [journal]);
+
+      const filteredRecipes = React.useMemo(() => {
+        const q = filter.trim().toLowerCase();
+        if (!q) return recipes;
+        return recipes.filter(r =>
+          r.name.toLowerCase().includes(q) ||
+          (r.tags || []).some(t => t.toLowerCase().includes(q))
+        );
+      }, [recipes, filter]);
+
+      const getDayPlan = (iso) => plan[iso] || { breakfast: "", lunch: "", dinner: "" };
+      const updateDayPlan = (iso, mealKey, value) => {
+        setPlan(p => ({ ...p, [iso]: { ...getDayPlan(iso), [mealKey]: value } }));
+      };
+      const copyPlanToJournal = (iso) => {
+        const dayPlan = getDayPlan(iso);
+        const exists = journal.find(j => j.date === iso);
+        const payload = { date: iso, meals: { ...dayPlan }, note: exists?.note || "", rating: exists?.rating || 0, photoUrl: exists?.photoUrl || "" };
+        setJournal(js => {
+          const others = js.filter(j => j.date !== iso);
+          return [...others, payload].sort((a,b) => (a.date < b.date ? 1 : -1));
+        });
+        setActiveTab("journal");
+      };
+      const removeDayFromPlan = (iso) => {
+        setPlan(p => { const cp = {...p}; delete cp[iso]; return cp; });
+      };
+      const updateJournal = (iso, patch) => setJournal(js => js.map(j => j.date === iso ? { ...j, ...patch } : j));
+      const deleteJournal = (iso) => setJournal(js => js.filter(j => j.date !== iso));
+
+      const stats = React.useMemo(() => {
+        const days = journal.length;
+        const avg = days ? (journal.reduce((s, j) => s + (j.rating || 0), 0) / days).toFixed(1) : "-";
+        const topTags = (() => {
+          const counter = new Map();
+          journal.forEach(j => {
+            Object.values(j.meals || {}).forEach(m => {
+              const rec = recipes.find(r => r.name === m);
+              (rec?.tags || []).forEach(t => counter.set(t, (counter.get(t) || 0) + 1));
+            });
+          });
+          return [...counter.entries()].sort((a,b) => b[1] - a[1]).slice(0,5);
+        })();
+        return { days, avg, topTags };
+      }, [journal, recipes]);
+
+      return (
+        <div className="min-h-screen bg-neutral-50 text-neutral-900 p-4 sm:p-6">
+          <div className="max-w-6xl mx-auto">
+            <header className="flex flex-col sm:flex-row gap-3 sm:items-end sm:justify-between mb-4">
+              <div>
+                <h1 className="text-2xl sm:text-3xl font-bold">食事プランナー & 日記（PWA・単一HTML版）</h1>
+                <p className="text-sm text-neutral-600">週の献立を立てて、作ったら日記化。ローカル保存 / オフライン対応。</p>
+              </div>
+              <div className="flex gap-2 items-center">
+                <button className="px-3 py-2 rounded-xl bg-neutral-900 text-white hover:opacity-90" onClick={() => {
+                  const blob = new Blob([JSON.stringify({recipes, plan, journal}, null, 2)], {type:"application/json"});
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `meal_planner_${Date.now()}.json`; a.click(); URL.revokeObjectURL(url);
+                }}>エクスポート</button>
+                <label className="px-3 py-2 rounded-xl bg-white border cursor-pointer">
+                  インポート
+                  <input type="file" accept="application/json" className="hidden" onChange={(e)=>{
+                    const f = e.target.files?.[0]; if(!f) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      try {
+                        const data = JSON.parse(String(reader.result));
+                        if (data.recipes && data.plan && data.journal) {
+                          setRecipes(data.recipes); setPlan(data.plan); setJournal(data.journal);
+                          alert("インポート完了");
+                        } else { alert("JSON形式が不正です"); }
+                      } catch { alert("読み込みに失敗しました"); }
+                    };
+                    reader.readAsText(f);
+                  }}/>
+                </label>
+                {installReady && (
+                  <button className="px-3 py-2 rounded-xl bg-emerald-600 text-white hover:opacity-90" onClick={doInstall}>
+                    インストール（PWA）
+                  </button>
+                )}
+              </div>
+            </header>
+
+            <nav className="flex gap-2 mb-4">
+              {[
+                { id: "planner", label: "献立" },
+                { id: "journal", label: "日記" },
+                { id: "recipes", label: "レシピ帳" },
+                { id: "stats", label: "統計" },
+              ].map(t => (
+                <button key={t.id}
+                  className={"px-3 py-2 rounded-xl border " + (activeTab===t.id ? "bg-neutral-900 text-white" : "bg-white")}
+                  onClick={()=>setActiveTab(t.id)}>
+                  {t.label}
+                </button>
+              ))}
+            </nav>
+
+            {activeTab === "planner" && (
+              <section className="bg-white rounded-2xl shadow p-3 sm:p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <button className="px-2 py-1 rounded-lg border" onClick={()=>setAnchorDate(addDays(weekStart, -7))}>◀ 先週</button>
+                    <button className="px-2 py-1 rounded-lg border" onClick={()=>setAnchorDate(new Date())}>今週</button>
+                    <button className="px-2 py-1 rounded-lg border" onClick={()=>setAnchorDate(addDays(weekStart, 7))}>来週 ▶</button>
+                  </div>
+                  <div className="text-sm text-neutral-600">{fmtDate(weekStart)} 〜 {fmtDate(addDays(weekStart,6))}</div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-7 gap-3">
+                  {Array.from({length:7}, (_,i)=>addDays(weekStart,i)).map((d) => {
+                    const iso = fmtDate(d);
+                    const dayPlan = getDayPlan(iso);
+                    const jpWeek = ["月","火","水","木","金","土","日"][(d.getDay()+6)%7];
+                    return (
+                      <div key={iso} className="border rounded-xl p-3 flex flex-col gap-2">
+                        <div className="flex items-center justify-between">
+                          <div className="font-semibold">{iso}（{jpWeek}）</div>
+                          <div className="flex gap-2">
+                            <button className="text-xs px-2 py-1 border rounded-lg" onClick={()=>copyPlanToJournal(iso)}>→日記</button>
+                            <button className="text-xs px-2 py-1 border rounded-lg" onClick={()=>removeDayFromPlan(iso)}>クリア</button>
+                          </div>
+                        </div>
+                        {["breakfast","lunch","dinner"].map(mealKey => (
+                          <div key={mealKey}>
+                            <label className="text-xs text-neutral-600">{mealKey==="breakfast"?"朝食":mealKey==="lunch"?"昼食":"夕食"}</label>
+                            <input className="w-full mt-1 px-2 py-1 border rounded-lg"
+                              placeholder="料理名（自由入力 or 下のレシピ名をコピペ）"
+                              value={dayPlan[mealKey] || ""}
+                              onChange={e=>updateDayPlan(iso, mealKey, e.target.value)} />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-4 text-xs text-neutral-600">ヒント：下の「レシピ帳」で料理名をクリックするとコピーできます。</div>
+              </section>
+            )}
+
+            {activeTab === "journal" && (
+              <section className="bg-white rounded-2xl shadow p-3 sm:p-4">
+                {journal.length===0 && (<p className="text-neutral-600">まだ日記がありません。献立タブで日付の「→日記」を押してください。</p>)}
+                <div className="flex flex-col gap-3">
+                  {journal.map(j => (
+                    <div key={j.date} className="border rounded-xl p-3">
+                      <div className="flex items-center justify-between">
+                        <div className="font-semibold">{j.date}</div>
+                        <button className="text-xs px-2 py-1 border rounded-lg" onClick={()=>deleteJournal(j.date)}>削除</button>
+                      </div>
+                      <div className="grid sm:grid-cols-3 gap-3 mt-2">
+                        <div><div className="text-xs text-neutral-600">朝食</div><div className="p-2 border rounded-lg min-h-10">{j.meals?.breakfast || "-"}</div></div>
+                        <div><div className="text-xs text-neutral-600">昼食</div><div className="p-2 border rounded-lg min-h-10">{j.meals?.lunch || "-"}</div></div>
+                        <div><div className="text-xs text-neutral-600">夕食</div><div className="p-2 border rounded-lg min-h-10">{j.meals?.dinner || "-"}</div></div>
+                      </div>
+                      <div className="mt-3 grid sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs text-neutral-600">メモ</label>
+                          <textarea className="w-full mt-1 p-2 border rounded-lg" rows="3"
+                            placeholder="味の出来、家族の反応、次回の改善点など"
+                            value={j.note || ""}
+                            onChange={e=>updateJournal(j.date, { note: e.target.value })}></textarea>
+                        </div>
+                        <div className="grid gap-2">
+                          <div>
+                            <label className="text-xs text-neutral-600">満足度</label>
+                            <input type="range" min="0" max="5" step="1" className="w-full"
+                              value={j.rating || 0}
+                              onChange={e=>updateJournal(j.date, { rating: Number(e.target.value) })}/>
+                            <div className="text-sm">{j.rating || 0} / 5</div>
+                          </div>
+                          <div>
+                            <label className="text-xs text-neutral-600">写真URL（任意）</label>
+                            <input className="w-full mt-1 px-2 py-1 border rounded-lg" placeholder="https://..."
+                              value={j.photoUrl || ""}
+                              onChange={e=>updateJournal(j.date, { photoUrl: e.target.value })} />
+                            {j.photoUrl && (<img src={j.photoUrl} alt="meal" className="mt-2 w-full h-40 object-cover rounded-xl border" />)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {activeTab === "recipes" && (
+              <section className="bg-white rounded-2xl shadow p-3 sm:p-4">
+                <div className="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between mb-3">
+                  <input className="w-full sm:w-80 px-3 py-2 border rounded-xl" placeholder="レシピ検索（料理名/タグ）"
+                    value={filter} onChange={e=>setFilter(e.target.value)} />
+                  <AddRecipeForm onAdd={(r)=>setRecipes(rs=>[...rs, r])} />
+                </div>
+                <div>
+                  {filteredRecipes.length===0 ? (
+                    <p className="text-neutral-600">該当なし</p>
+                  ) : (
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {filteredRecipes.map(r => (
+                        <div key={r.id} className="border rounded-xl p-3 bg-white">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <button title="クリックでコピー" onClick={()=>navigator.clipboard.writeText(r.name)} className="font-semibold hover:underline">{r.name}</button>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {(r.tags || []).map((t, i) => (<span key={i} className="text-xs px-2 py-0.5 rounded-full bg-neutral-100 border">#{t}</span>))}
+                              </div>
+                            </div>
+                            <button className="text-xs px-2 py-1 border rounded-lg" onClick={()=>setRecipes(rs => rs.filter(x => x.id !== r.id))}>削除</button>
+                          </div>
+                          {r.notes && <p className="text-sm text-neutral-700 mt-2 whitespace-pre-wrap">{r.notes}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {activeTab === "stats" && (
+              <section className="bg-white rounded-2xl shadow p-3 sm:p-4">
+                <div className="grid sm:grid-cols-3 gap-3">
+                  <StatCard label="日記に記録した日" value={stats.days + " 日"} />
+                  <StatCard label="平均満足度" value={stats.avg} />
+                  <div className="border rounded-2xl p-3">
+                    <div className="text-sm text-neutral-600">よく登場するタグ</div>
+                    <ul className="mt-2 list-disc list-inside text-sm">
+                      {stats.topTags.length === 0 ? (
+                        <li className="text-neutral-600">まだありません</li>
+                      ) : (
+                        stats.topTags.map(([tag, count]) => (<li key={tag}>#{tag} × {count}</li>))
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            <footer className="text-xs text-neutral-500 mt-6">
+              <p>データはこの端末のブラウザに保存。PWAとしてホーム追加後はオフラインでも使えます（初回はオンラインで開いてキャッシュさせてください）。</p>
+            </footer>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
