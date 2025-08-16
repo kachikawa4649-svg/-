@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>食事プランナー & 日記（修正版）</title>
+</head>
+<body>
+<h1>食事プランナー & 日記（修正版）</h1>
+<script>
+// 日付フォーマット関数（ローカル時間基準でズレ防止）
+const fmtDate = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+// 確認用出力
+document.body.innerHTML += "<p>今日の日付: " + fmtDate(new Date()) + "</p>";
+</script>
+</body>
+</html>
